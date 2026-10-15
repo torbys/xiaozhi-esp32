@@ -266,6 +266,13 @@ void AudioService::AudioOutputTask() {
 
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
+        // ==== MEASUREMENT TAP (voice-log analyzer) ====
+        // Captured while the lock is held so the log does not race the queue.
+        const int playback_remaining = (int)audio_playback_queue_.size();
+        if (playback_remaining == 0) {
+            ESP_LOGW(TAG, "AudioOutputTask: Playback queue getting low! remaining=%d/%d, potential audio gap",
+                     playback_remaining, MAX_PLAYBACK_TASKS_IN_QUEUE);
+        }
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -275,6 +282,10 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
         }
         codec_->OutputData(task->pcm);
+
+        // ==== MEASUREMENT TAP (voice-log analyzer) ====
+        ESP_LOGW(TAG, "AudioOutputTask: Playing audio, pcm_samples=%d, ts=%u, playback_queue_remaining=%d",
+                 (int)task->pcm.size(), (unsigned)task->timestamp, playback_remaining);
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -418,6 +429,12 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
             return false;
         }
     }
+    // ==== MEASUREMENT TAP (voice-log analyzer) ====
+    // Logged before the move so the packet fields are still valid. This mirrors
+    // the line the stock firmware emits, so existing analysis stays comparable.
+    ESP_LOGW(TAG, "Packet pushed to decode queue, new size: %d, sr=%d, ts=%u, size=%u",
+             (int)audio_decode_queue_.size(), packet->sample_rate, (unsigned)packet->timestamp,
+             (unsigned)packet->payload.size());
     audio_decode_queue_.push_back(std::move(packet));
     audio_queue_cv_.notify_all();
     return true;

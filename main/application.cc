@@ -77,12 +77,24 @@ void Application::Initialize() {
     callbacks.on_send_queue_available = [this]() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_SEND_AUDIO);
     };
+    // ==== MEASUREMENT TAP (voice-log analyzer) =================================
+    // These lines are the measurement surface for the local log analyzer. The
+    // ESP-IDF prefix "I (12345) Application:" already carries the device
+    // millisecond clock, so no timestamp is printed here.
+    // This callback runs on the audio task, so it must only log -- state
+    // mutations still go through the event group.
     callbacks.on_wake_word_detected = [this](const std::string& wake_word) {
+        ESP_LOGI(TAG, "WAKE %s", wake_word.c_str());
         xEventGroupSetBits(event_group_, MAIN_EVENT_WAKE_WORD_DETECTED);
     };
+    // VAD edges give the analyzer the "user started / stopped speaking" anchor
+    // that the stock firmware never prints. Logged here rather than in the main
+    // loop because the event-group bit coalesces rapid transitions.
     callbacks.on_vad_change = [this](bool speaking) {
+        ESP_LOGI(TAG, "VAD %s", speaking ? "start" : "end");
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
     };
+    // ===========================================================================
     audio_service_.SetCallbacks(callbacks);
 
     // Add state change listeners
@@ -517,6 +529,18 @@ void Application::InitializeProtocol() {
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
         // Parse JSON data
         auto type = cJSON_GetObjectItem(root, "type");
+        // ==== MEASUREMENT TAP (voice-log analyzer) =================================
+        // One line per inbound server message, so every server-side stage gets a
+        // timestamp without having to know its exact schema up front: intent /
+        // tool calls ("mcp"), LLM sentence ("tts" + sentence_start), TTS start and
+        // stop ("tts" + start/stop), emotion ("llm"), ASR text ("stt").
+        if (cJSON_IsString(type)) {
+            auto rx_state = cJSON_GetObjectItem(root, "state");
+            ESP_LOGI(TAG, "RX type=%s%s%s", type->valuestring,
+                     cJSON_IsString(rx_state) ? " state=" : "",
+                     cJSON_IsString(rx_state) ? rx_state->valuestring : "");
+        }
+        // ===========================================================================
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {

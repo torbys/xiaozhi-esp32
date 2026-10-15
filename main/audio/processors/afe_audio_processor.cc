@@ -66,7 +66,18 @@ void AfeAudioProcessor::Initialize(AudioCodec* codec, int frame_duration_ms, srm
 
     afe_iface_ = esp_afe_handle_from_config(afe_config);
     afe_data_ = afe_iface_->create_from_config(afe_config);
-    
+
+    // ==== MEASUREMENT TAP (voice-log analyzer) =================================
+    // Logged once at startup. The analyzer needs the silence threshold to turn
+    // "VAD end" into the acoustic end of speech: the VAD only reports silence
+    // after vad_min_noise_ms of it, so
+    //     acoustic_speech_end ~= VAD end - vad_min_noise_ms
+    // Emitting the real configured value keeps the analyzer from hard-coding it.
+    ESP_LOGI(TAG, "VADCFG min_noise_ms=%d mode=%d aec=%d vad=%d",
+             (int)afe_config->vad_min_noise_ms, (int)afe_config->vad_mode,
+             (int)afe_config->aec_init, (int)afe_config->vad_init);
+    // ===========================================================================
+
     xTaskCreate([](void* arg) {
         auto this_ = (AfeAudioProcessor*)arg;
         this_->AudioProcessorTask();

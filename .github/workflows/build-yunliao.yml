@@ -1,0 +1,60 @@
+name: Build yunliao-s3 (instrumented)
+
+# Cloud build for the 云聊 S3 measurement firmware.
+# Produces the flashable images as workflow artifacts, so the local machine
+# never needs ESP-IDF installed (~5 MB of esptool is enough to flash).
+#
+# NOTE: this targets the v2.1.0 tree, whose build entry point is
+# `scripts/release.py <board> --name <variant>` (the newer scripts/build.py
+# does not exist at this tag), and whose CI runs on ESP-IDF v5.5.
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - yunliao-instrumented
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build yunliao-s3
+    runs-on: ubuntu-latest
+    container:
+      # Must match .github/workflows/build.yml at this tag (ESP-IDF v5.5).
+      image: espressif/idf:release-v5.5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build
+        shell: bash
+        run: |
+          source "$IDF_PATH/export.sh"
+          idf.py --version
+          python scripts/release.py yunliao-s3 --name yunliao-s3
+
+      - name: Show build outputs
+        shell: bash
+        run: |
+          echo "--- build/ ---"
+          ls -la build/ 2>/dev/null | head -40
+          echo "--- bootloader ---"
+          ls -la build/bootloader 2>/dev/null || true
+          echo "--- partition_table ---"
+          ls -la build/partition_table 2>/dev/null || true
+          echo "--- flash_args ---"
+          cat build/flash_args 2>/dev/null || true
+
+      - name: Upload flashable images
+        uses: actions/upload-artifact@v4
+        with:
+          name: yunliao-s3-instrumented
+          if-no-files-found: error
+          path: |
+            build/merged-binary.bin
+            build/*.bin
+            build/bootloader/*.bin
+            build/partition_table/*.bin
+            build/flash_args
