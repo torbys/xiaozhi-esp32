@@ -213,9 +213,15 @@ class YunliaoS3 : public DualNetworkBoard {
             vTaskDelay(pdMS_TO_TICKS(10));
         }
         InitializeButtons();
+#if CONFIG_USE_DEVICE_AEC
+        // Only meaningful when the build actually carries device-side AEC. This
+        // measurement build leaves it off so the AFE pipeline matches the
+        // firmware the device ships with, so requesting it here would only
+        // produce a "Device AEC is not supported" error at every boot.
         Settings settings("aec", false);
         auto& app = Application::GetInstance();
         app.SetAecMode(settings.GetInt("mode",kAecOnDeviceSide) == kAecOnDeviceSide ? kAecOnDeviceSide : kAecOff);
+#endif
         InitializeTools();
     }
 
