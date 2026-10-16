@@ -12,6 +12,10 @@ struct AudioStreamPacket {
     int frame_duration = 0;
     uint32_t timestamp = 0;
     std::vector<uint8_t> payload;
+    // MEASUREMENT TAP: "server" = inbound server TTS, "local" = on-device prompt tone.
+    // Both end up in the same decode/playback queue, so the log has to say which is which.
+    // Appended last so the existing designated initialisers in the protocol classes stay valid.
+    const char* source = "server";
 };
 
 struct BinaryProtocol2 {

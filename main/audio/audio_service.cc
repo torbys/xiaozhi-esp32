@@ -281,11 +281,19 @@ void AudioService::AudioOutputTask() {
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
             codec_->EnableOutput(true);
         }
+        {
+            // MEASUREMENT TAP: this frame is the one now going out to the speaker, so it
+            // defines "how far into the reply the audio has got" for anything logged next.
+            std::lock_guard<std::mutex> ts_lock(audio_queue_mutex_);
+            playback_timestamp_ = task->timestamp;
+        }
         codec_->OutputData(task->pcm);
 
         // ==== MEASUREMENT TAP (voice-log analyzer) ====
-        ESP_LOGW(TAG, "AudioOutputTask: Playing audio, pcm_samples=%d, ts=%u, playback_queue_remaining=%d",
-                 (int)task->pcm.size(), (unsigned)task->timestamp, playback_remaining);
+        // `src=` is appended to the stock line so a local prompt tone is never mistaken
+        // for the start of the assistant's reply.
+        ESP_LOGW(TAG, "AudioOutputTask: Playing audio, pcm_samples=%d, ts=%u, playback_queue_remaining=%d, src=%s",
+                 (int)task->pcm.size(), (unsigned)task->timestamp, playback_remaining, task->source);
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -319,12 +327,22 @@ void AudioService::OpusCodecTask() {
         if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
             auto packet = std::move(audio_decode_queue_.front());
             audio_decode_queue_.pop_front();
+            // Read the remaining depth while the lock is still held.
+            const int decode_remaining = (int)audio_decode_queue_.size();
             audio_queue_cv_.notify_all();
             lock.unlock();
 
             auto task = std::make_unique<AudioTask>();
             task->type = kAudioTaskTypeDecodeToPlaybackQueue;
             task->timestamp = packet->timestamp;
+            task->source = packet->source;
+
+            // ==== MEASUREMENT TAP (voice-log analyzer) ====
+            // The vendor firmware prints this line; restore it so an instrumented capture
+            // stays line-for-line comparable with a stock one.
+            ESP_LOGW(TAG, "OpusCodecTask: Processing packet from decode queue, remaining=%d, sr=%d, fd=%d, ts=%u, payload=%u bytes",
+                     decode_remaining, packet->sample_rate, packet->frame_duration,
+                     (unsigned)packet->timestamp, (unsigned)packet->payload.size());
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
@@ -420,24 +438,41 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
     audio_queue_cv_.notify_all();
 }
 
-bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait) {
+bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait,
+                                           const char* source) {
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
             audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
         } else {
+            // MEASUREMENT TAP: with wait=false a full queue silently truncates the reply.
+            // Callers ignore the return value, so make the drop visible in the log.
+            ESP_LOGW(TAG, "Decode queue full, packet DROPPED src=%s ts=%u size=%u",
+                     source, (unsigned)packet->timestamp, (unsigned)packet->payload.size());
             return false;
         }
     }
     // ==== MEASUREMENT TAP (voice-log analyzer) ====
-    // Logged before the move so the packet fields are still valid. This mirrors
-    // the line the stock firmware emits, so existing analysis stays comparable.
-    ESP_LOGW(TAG, "Packet pushed to decode queue, new size: %d, sr=%d, ts=%u, size=%u",
+    // Logged before the move so the packet fields are still valid. The prefix mirrors the
+    // line the stock firmware emits, so existing analysis stays comparable; `src=` is
+    // appended so server TTS can be told apart from an on-device prompt tone.
+    last_packet_timestamp_ = packet->timestamp;
+    ESP_LOGW(TAG, "Packet pushed to decode queue, new size: %d, sr=%d, ts=%u, size=%u, src=%s",
              (int)audio_decode_queue_.size(), packet->sample_rate, (unsigned)packet->timestamp,
-             (unsigned)packet->payload.size());
+             (unsigned)packet->payload.size(), source);
     audio_decode_queue_.push_back(std::move(packet));
     audio_queue_cv_.notify_all();
     return true;
+}
+
+uint32_t AudioService::GetLastPacketTimestamp() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return last_packet_timestamp_;
+}
+
+uint32_t AudioService::GetPlaybackTimestamp() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    return playback_timestamp_;
 }
 
 std::unique_ptr<AudioStreamPacket> AudioService::PopPacketFromSendQueue() {
@@ -631,9 +666,10 @@ void AudioService::PlaySound(const std::string_view& ogg) {
             auto packet = std::make_unique<AudioStreamPacket>();
             packet->sample_rate = sample_rate;
             packet->frame_duration = 60;
+            packet->source = "local";
             packet->payload.resize(pkt_len);
             std::memcpy(packet->payload.data(), pkt_ptr, pkt_len);
-            PushPacketToDecodeQueue(std::move(packet), true);
+            PushPacketToDecodeQueue(std::move(packet), true, "local");
         }
 
         offset = body_off + body_size;
@@ -652,6 +688,10 @@ void AudioService::ResetDecoder() {
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
+    // MEASUREMENT TAP: a new round starts from a clean audio position, otherwise the RX
+    // stamp would report the previous reply's last frame.
+    last_packet_timestamp_ = 0;
+    playback_timestamp_ = 0;
     audio_queue_cv_.notify_all();
 }
 

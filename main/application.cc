@@ -505,7 +505,12 @@ void Application::InitializeProtocol() {
     
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
         if (GetDeviceState() == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+            // MEASUREMENT TAP: tag the source. Server TTS and on-device prompt tones share
+            // one decode/playback queue, so without this the log cannot tell them apart.
+            // The return value used to be discarded; a full queue silently drops audio.
+            if (!audio_service_.PushPacketToDecodeQueue(std::move(packet), false, "server")) {
+                ESP_LOGW(TAG, "Dropped a server audio packet: decode queue full");
+            }
         }
     });
     
@@ -536,9 +541,17 @@ void Application::InitializeProtocol() {
         // stop ("tts" + start/stop), emotion ("llm"), ASR text ("stt").
         if (cJSON_IsString(type)) {
             auto rx_state = cJSON_GetObjectItem(root, "state");
-            ESP_LOGI(TAG, "RX type=%s%s%s", type->valuestring,
+            // MEASUREMENT TAP: also stamp the audio-stream position (server `ts`, ms) at the
+            // moment this message arrived: `ts_rx` = newest packet handed to the decoder,
+            // `ts_play` = frame currently going to the speaker. A `sentence_start` is only a
+            // subtitle notification and can arrive long after its audio has begun playing,
+            // so without these two numbers the alignment has to be guessed from log order.
+            ESP_LOGI(TAG, "RX type=%s%s%s ts_rx=%u ts_play=%u",
+                     type->valuestring,
                      cJSON_IsString(rx_state) ? " state=" : "",
-                     cJSON_IsString(rx_state) ? rx_state->valuestring : "");
+                     cJSON_IsString(rx_state) ? rx_state->valuestring : "",
+                     (unsigned)audio_service_.GetLastPacketTimestamp(),
+                     (unsigned)audio_service_.GetPlaybackTimestamp());
         }
         // ===========================================================================
         if (strcmp(type->valuestring, "tts") == 0) {

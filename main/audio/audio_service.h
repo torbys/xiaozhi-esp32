@@ -70,6 +70,9 @@ struct AudioTask {
     AudioTaskType type;
     std::vector<int16_t> pcm;
     uint32_t timestamp;
+    // MEASUREMENT TAP: carried through from AudioStreamPacket so the playback log can
+    // name the source instead of the analyzer guessing from the timestamp alone.
+    const char* source = "server";
 };
 
 struct DebugStatistics {
@@ -103,12 +106,20 @@ public:
 
     void SetCallbacks(AudioServiceCallbacks& callbacks);
 
-    bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false);
+    bool PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> packet, bool wait = false,
+                                 const char* source = "server");
     std::unique_ptr<AudioStreamPacket> PopPacketFromSendQueue();
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
     void SetModelsList(srmodel_list_t* models_list);
+
+    // MEASUREMENT TAP: audio-stream position (the server's `ts`, in ms) of the newest
+    // packet pushed into the decode queue, and of the frame most recently handed to the
+    // codec. Attaching these to every inbound server message turns "which audio does this
+    // subtitle belong to?" from a log-ordering guess into an exact number.
+    uint32_t GetLastPacketTimestamp();
+    uint32_t GetPlaybackTimestamp();
 
 private:
     AudioCodec* codec_ = nullptr;
@@ -139,6 +150,9 @@ private:
     std::deque<std::unique_ptr<AudioTask>> audio_playback_queue_;
     // For server AEC
     std::deque<uint32_t> timestamp_queue_;
+    // MEASUREMENT TAP: see GetLastPacketTimestamp() / GetPlaybackTimestamp().
+    uint32_t last_packet_timestamp_ = 0;
+    uint32_t playback_timestamp_ = 0;
 
     bool wake_word_initialized_ = false;
     bool audio_processor_initialized_ = false;
