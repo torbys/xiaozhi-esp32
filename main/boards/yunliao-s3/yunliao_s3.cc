@@ -19,6 +19,7 @@ class YunliaoS3 : public DualNetworkBoard {
    private:
     i2c_master_bus_handle_t codec_i2c_bus_;
     Button boot_button_;
+    bool startup_button_pending_release_ = false;
     SpiLcdDisplay* display_;
     PowerSaveTimer* power_save_timer_;
     PowerManager* power_manager_;
@@ -72,6 +73,12 @@ class YunliaoS3 : public DualNetworkBoard {
     }
 
     void InitializeButtons() {
+        boot_button_.OnPressUp([this]() {
+            if (startup_button_pending_release_) {
+                startup_button_pending_release_ = false;
+                ESP_LOGI(TAG, "BOOT phase=button_released gpio=%d", BOOT_BUTTON_PIN);
+            }
+        });
         boot_button_.OnClick([this]() {
             power_save_timer_->WakeUp();
             auto& app = Application::GetInstance();
@@ -95,6 +102,9 @@ class YunliaoS3 : public DualNetworkBoard {
                 }
             }, 3);
         boot_button_.OnLongPress([this]() {
+            if (startup_button_pending_release_) {
+                return;
+            }
             ESP_LOGI(TAG, "Button LongPress to Sleep");
             display_->SetStatus(Lang::Strings::PLEASE_WAIT);
             vTaskDelay(pdMS_TO_TICKS(2000));
@@ -209,25 +219,12 @@ class YunliaoS3 : public DualNetworkBoard {
             power_manager_->Start4G();
         }
         GetBacklight()->RestoreBrightness();
-        ESP_LOGI(TAG, "BOOT phase=button_release gpio=%d level=%d", BOOT_BUTTON_PIN,
-                 gpio_get_level(BOOT_BUTTON_PIN));
-        constexpr uint32_t kButtonPollIntervalMs = 10;
-        constexpr uint32_t kButtonWaitLogIntervalMs = 1000;
-        const TickType_t button_wait_started = xTaskGetTickCount();
-        TickType_t last_wait_log = button_wait_started;
-        while (gpio_get_level(BOOT_BUTTON_PIN) == 0) {
-            vTaskDelay(pdMS_TO_TICKS(kButtonPollIntervalMs));
-            const TickType_t now = xTaskGetTickCount();
-            if (now - last_wait_log >= pdMS_TO_TICKS(kButtonWaitLogIntervalMs)) {
-                ESP_LOGW(TAG, "BOOT phase=button_release_wait gpio=%d level=%d waited_ms=%lu",
-                         BOOT_BUTTON_PIN, gpio_get_level(BOOT_BUTTON_PIN),
-                         static_cast<unsigned long>((now - button_wait_started) * portTICK_PERIOD_MS));
-                last_wait_log = now;
-            }
-        }
-        ESP_LOGI(TAG, "BOOT phase=button_released gpio=%d level=%d waited_ms=%lu",
+        // Do not block audio/network startup on a held button. The first release
+        // arms long-press shutdown so powering on cannot immediately power off.
+        startup_button_pending_release_ = gpio_get_level(BOOT_BUTTON_PIN) == 0;
+        ESP_LOGI(TAG, "BOOT phase=button_state gpio=%d level=%d pending_release=%d",
                  BOOT_BUTTON_PIN, gpio_get_level(BOOT_BUTTON_PIN),
-                 static_cast<unsigned long>((xTaskGetTickCount() - button_wait_started) * portTICK_PERIOD_MS));
+                 startup_button_pending_release_);
         InitializeButtons();
         ESP_LOGI(TAG, "BOOT phase=buttons_ready");
 #if CONFIG_USE_DEVICE_AEC
