@@ -209,10 +209,27 @@ class YunliaoS3 : public DualNetworkBoard {
             power_manager_->Start4G();
         }
         GetBacklight()->RestoreBrightness();
+        ESP_LOGI(TAG, "BOOT phase=button_release gpio=%d level=%d", BOOT_BUTTON_PIN,
+                 gpio_get_level(BOOT_BUTTON_PIN));
+        constexpr uint32_t kButtonPollIntervalMs = 10;
+        constexpr uint32_t kButtonWaitLogIntervalMs = 1000;
+        const TickType_t button_wait_started = xTaskGetTickCount();
+        TickType_t last_wait_log = button_wait_started;
         while (gpio_get_level(BOOT_BUTTON_PIN) == 0) {
-            vTaskDelay(pdMS_TO_TICKS(10));
+            vTaskDelay(pdMS_TO_TICKS(kButtonPollIntervalMs));
+            const TickType_t now = xTaskGetTickCount();
+            if (now - last_wait_log >= pdMS_TO_TICKS(kButtonWaitLogIntervalMs)) {
+                ESP_LOGW(TAG, "BOOT phase=button_release_wait gpio=%d level=%d waited_ms=%lu",
+                         BOOT_BUTTON_PIN, gpio_get_level(BOOT_BUTTON_PIN),
+                         static_cast<unsigned long>((now - button_wait_started) * portTICK_PERIOD_MS));
+                last_wait_log = now;
+            }
         }
+        ESP_LOGI(TAG, "BOOT phase=button_released gpio=%d level=%d waited_ms=%lu",
+                 BOOT_BUTTON_PIN, gpio_get_level(BOOT_BUTTON_PIN),
+                 static_cast<unsigned long>((xTaskGetTickCount() - button_wait_started) * portTICK_PERIOD_MS));
         InitializeButtons();
+        ESP_LOGI(TAG, "BOOT phase=buttons_ready");
 #if CONFIG_USE_DEVICE_AEC
         // Only meaningful when the build actually carries device-side AEC. This
         // measurement build leaves it off so the AFE pipeline matches the
@@ -222,7 +239,9 @@ class YunliaoS3 : public DualNetworkBoard {
         auto& app = Application::GetInstance();
         app.SetAecMode(settings.GetInt("mode",kAecOnDeviceSide) == kAecOnDeviceSide ? kAecOnDeviceSide : kAecOff);
 #endif
+        ESP_LOGI(TAG, "BOOT phase=tools_init");
         InitializeTools();
+        ESP_LOGI(TAG, "BOOT phase=board_ready");
     }
 
     virtual AudioCodec* GetAudioCodec() override {
